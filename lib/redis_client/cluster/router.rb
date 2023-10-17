@@ -331,9 +331,7 @@ class RedisClient
             # ignore
           end
 
-          if @connect_with_original_config
-            @config = @original_config.dup
-          end
+          @config = @original_config.dup if @connect_with_original_config
           @node = fetch_cluster_info(@config, @concurrent_worker, pool: @pool, **@client_kwargs)
         end
       end
