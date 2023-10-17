@@ -24,17 +24,22 @@ class RedisClient
         def load(nodes, slow_command_timeout: -1)
           cmd = errors = nil
 
-          nodes&.each do |node|
-            regular_timeout = node.read_timeout
-            node.read_timeout = slow_command_timeout > 0.0 ? slow_command_timeout : regular_timeout
-            reply = node.call('COMMAND')
-            node.read_timeout = regular_timeout
-            commands = parse_command_reply(reply)
-            cmd = ::RedisClient::Cluster::Command.new(commands)
-            break
-          rescue ::RedisClient::Error => e
-            errors ||= []
-            errors << e
+          # This change hacks around https://bugs.ruby-lang.org/issues/18991
+          # More details in the issue but when code coverage is enabled, this would cause a break from proc-closure error
+          # when running tests. This is patched in ruby3.2 and should be removed once we upgrade
+          if nodes
+            nodes.each do |node|
+              regular_timeout = node.read_timeout
+              node.read_timeout = slow_command_timeout > 0.0 ? slow_command_timeout : regular_timeout
+              reply = node.call('COMMAND')
+              node.read_timeout = regular_timeout
+              commands = parse_command_reply(reply)
+              cmd = ::RedisClient::Cluster::Command.new(commands)
+              break
+            rescue ::RedisClient::Error => e
+              errors ||= []
+              errors << e
+            end
           end
 
           return cmd unless cmd.nil?
