@@ -28,6 +28,8 @@ class RedisClient
         @mutex = Mutex.new
         @command_builder = @config.command_builder
         @force_primary_level = 0
+        @watched_node = nil
+        @watched_node_was_disable_reconection = nil
       end
 
       def send_command(method, command, *args, &block) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
@@ -46,13 +48,15 @@ class RedisClient
         when 'memory'   then send_memory_command(method, command, args, &block)
         when 'script'   then send_script_command(method, command, args, &block)
         when 'pubsub'   then send_pubsub_command(method, command, args, &block)
+        when 'watch'    then send_watch_command(method, command, args, &block)
+        when 'unwatch'  then send_unwatch_command(method, command, args, &block)
         when 'acl', 'auth', 'bgrewriteaof', 'bgsave', 'quit', 'save'
           @node.call_all(method, command, args).first.then(&TSF.call(block))
         when 'flushall', 'flushdb'
           @node.call_primaries(method, command, args).first.then(&TSF.call(block))
         when 'readonly', 'readwrite', 'shutdown'
           raise ::RedisClient::Cluster::OrchestrationCommandNotSupported, cmd
-        when 'discard', 'exec', 'multi', 'unwatch'
+        when 'discard', 'exec', 'multi'
           raise ::RedisClient::Cluster::AmbiguousNodeError, cmd
         else
           node = assign_node(command)
@@ -89,25 +93,26 @@ class RedisClient
         if e.message.start_with?('MOVED')
           node = assign_redirection_node(e.message)
           retry_count -= 1
-          retry
         elsif e.message.start_with?('ASK')
           node = assign_asking_node(e.message)
           node.call('ASKING')
           retry_count -= 1
-          retry
         elsif e.message.start_with?('CLUSTERDOWN Hash slot not served')
           update_cluster_info!
           retry_count -= 1
-          retry
         else
           raise
         end
+
+        raise if unset_watched_node
+        retry
       rescue ::RedisClient::ConnectionError => e
         raise if METHODS_FOR_BLOCKING_CMD.include?(method) && e.is_a?(RedisClient::ReadTimeoutError)
         raise if retry_count <= 0
 
         update_cluster_info!
         retry_count -= 1
+        raise if unset_watched_node
         retry
       end
 
@@ -121,24 +126,25 @@ class RedisClient
         if e.message.start_with?('MOVED')
           node = assign_redirection_node(e.message)
           retry_count -= 1
-          retry
         elsif e.message.start_with?('ASK')
           node = assign_asking_node(e.message)
           node.call('ASKING')
           retry_count -= 1
-          retry
         elsif e.message.start_with?('CLUSTERDOWN Hash slot not served')
           update_cluster_info!
           retry_count -= 1
-          retry
         else
           raise
         end
+
+        raise if unset_watched_node
+        retry
       rescue ::RedisClient::ConnectionError
         raise if retry_count <= 0
 
         update_cluster_info!
         retry_count -= 1
+        raise if unset_watched_node
         retry
       end
 
@@ -314,6 +320,29 @@ class RedisClient
         end
       end
 
+      def send_watch_command(method, command, args, &block) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity
+        # Assign based on this WATCH command if we're not watching anything yet
+        set_watched_node command
+        begin
+          ret = try_send(@watched_node, method, command, args, &block)
+        rescue Object
+          unset_watched_node
+          raise
+        end
+        ret
+      end
+
+      def send_unwatch_command(method, command, args, &block)
+        # unwatch without watch is a no-op, and redis-rb insists on sending it.
+        return if @watched_node.nil?
+
+        begin
+          try_send(@watched_node, method, command, args, &block)
+        ensure
+          unset_watched_node
+        end
+      end
+
       def fetch_cluster_info(config, concurrent_worker, pool: nil, **kwargs)
         node_info_list = ::RedisClient::Cluster::Node.load_info(config.per_node_key, concurrent_worker, slow_command_timeout: config.slow_command_timeout, **kwargs)
         node_addrs = node_info_list.map { |i| ::RedisClient::Cluster::NodeKey.hashify(i.node_key) }
@@ -342,6 +371,34 @@ class RedisClient
           @config = @original_config.dup if @connect_with_original_config
           @node = fetch_cluster_info(@config, @concurrent_worker, pool: @pool, **@client_kwargs)
         end
+      end
+
+      def set_watched_node(command)
+        return unless @watched_node.nil?
+
+        @watched_node = assign_node(command)
+        # This is a hack, but we need to check out a connection from the pool and keep it checked out until we unwatch,
+        # if we're using a Pooled backend. Otherwise, we might not run commands on the same session we watched on.
+        # Note that ConnectionPool keeps a reference to this connection in a threadlocal, so we don't need to actually _use_ it
+        # explicitly; it'll get returned from #with like normal.
+        @watched_node.send(:pool).checkout if @pool
+        # Another hack - need to disable reconnection, but we can't use the block form.
+        @watched_node_was_disable_reconection = @watched_node.instance_variable_get(:@disable_reconnection)
+        @watched_node.instance_variable_set(:@disable_reconnection, true)
+        @force_primary_level += 1
+
+        @watched_node
+      end
+
+      def unset_watched_node
+        @watched_node.instance_variable_set(:@disable_reconnection, @watched_node_was_disable_reconection)
+        @watched_node_was_disable_reconection = nil
+        @watched_node.send(:pool).checkin if @pool
+        @force_primary_level -= 1
+
+        old_value = @watched_node
+        @watched_node = nil
+        old_value
       end
     end
   end

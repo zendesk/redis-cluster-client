@@ -60,7 +60,7 @@ class RedisClient
                 end
               end
             ensure
-              # unwatch, except if we committed (it's unnescessary) or the connection is broken anyway (it won't work)
+              # unwatch, except if we committed (it's unnecessary) or the connection is broken anyway (it won't work)
               @router.try_send(conn, :call_v, ['UNWATCH'], [], retry_count: 0) unless commit_result&.any? || !conn.connected?
             end
           end
