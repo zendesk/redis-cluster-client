@@ -28,6 +28,7 @@ class RedisClient
         @mutex = Mutex.new
         @command_builder = @config.command_builder
         @force_primary_level = 0
+        @watched_keys = []
       end
 
       def send_command(method, command, *args, &block) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
@@ -46,14 +47,15 @@ class RedisClient
         when 'memory'   then send_memory_command(method, command, args, &block)
         when 'script'   then send_script_command(method, command, args, &block)
         when 'pubsub'   then send_pubsub_command(method, command, args, &block)
+        when 'watch'    then send_watch_command(method, command, args, &block)
+        when 'unwatch', 'exec', 'multi', 'discard'
+          send_unwatch_command(method, command, args, &block)
         when 'acl', 'auth', 'bgrewriteaof', 'bgsave', 'quit', 'save'
           @node.call_all(method, command, args).first.then(&TSF.call(block))
         when 'flushall', 'flushdb'
           @node.call_primaries(method, command, args).first.then(&TSF.call(block))
         when 'readonly', 'readwrite', 'shutdown'
           raise ::RedisClient::Cluster::OrchestrationCommandNotSupported, cmd
-        when 'discard', 'exec', 'multi', 'unwatch'
-          raise ::RedisClient::Cluster::AmbiguousNodeError, cmd
         else
           node = assign_node(command)
           try_send(node, method, command, args, &block)
@@ -173,6 +175,10 @@ class RedisClient
 
       def find_node_key(command, seed: nil)
         key = @command.extract_first_key(command)
+        find_node_key_for_key(key, seed: seed)
+      end
+
+      def find_node_key_for_key(key, seed: nil)
         slot = key.empty? ? nil : ::RedisClient::Cluster::KeySlotConverter.convert(key)
 
         if @command.should_send_to_primary?(command) || @force_primary_level > 0
@@ -311,6 +317,44 @@ class RedisClient
           @node.call_replicas(method, command, args).reject(&:empty?).map { |e| Hash[*e] }
                .reduce({}) { |a, e| a.merge(e) { |_, v1, v2| v1 + v2 } }.then(&TSF.call(block))
         else assign_node(command).public_send(method, *args, command, &block)
+        end
+      end
+
+      def send_watch_command(method, command, args, &block) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity
+        new_watch_keys = @command.extract_all_keys(command)
+        proposed_slots = (@watched_keys + new_watch_keys).map { |key| RedisClient::Cluster::KeySlotConverter.convert(key) }.uniq
+        raise Transaction::ConsistencyError, 'can only watch keys from a single slot at a time' unless proposed_slots.size <= 1
+
+        node = assign_node(command)
+        # This is a hack, but we need to check out a connection from the pool and keep it checked out until we unwatch,
+        # if we're using a Pooled backend. Otherwise, we might not run commands on the same session we watched on.
+        # Note that ConnectionPool keeps a reference to this connection in a threadlocal, so we don't need to actually _use_ it
+        # explicitly; it'll get returned from #with like normal.
+        node.send(:pool).checkout if @pool && @watch_connection.nil?
+        begin
+          ret = try_send(node, method, command, args, &block)
+        rescue Object
+          node.send(:pool).checkin if @pool && @watch_connection.nil?
+          raise
+        else
+          @watched_keys.append new_watch_keys
+          @force_primary_level += 1
+        end
+        ret
+      end
+
+      def send_unwatch_command(method, command, args, &block)
+        raise AmbiguousNodeError, "not watching any keys; don't know where to send command" if @watched_keys.empty?
+
+        node_key = find_node_key_for_key(@watched_keys.first)
+        node = find_node(node_key)
+
+        begin
+          try_send(node, method, command, args, &block)
+        ensure
+          @watched_keys.clear
+          @force_primary_level -= 1
+          node.send(:pool).checkin if @pool && @watch_connection.nil?
         end
       end
 
