@@ -14,14 +14,8 @@ class RedisClient
         MEASURE_ATTEMPT_COUNT = 10
 
         def initialize(replications, options, pool, concurrent_worker, **kwargs)
+          @concurrent_worker = concurrent_worker
           super
-
-          all_replica_clients = @clients.select { |k, _| @replica_node_keys.include?(k) }
-          latencies = measure_latencies(all_replica_clients, concurrent_worker)
-          @replications.each_value { |keys| keys.sort_by! { |k| latencies.fetch(k) } }
-          @replica_clients = select_replica_clients(@replications, @clients)
-          @clients_for_scanning = select_clients_for_scanning(@replications, @clients)
-          @existed_replicas = @replications.values.reject(&:empty?)
         end
 
         def clients_for_scanning(seed: nil) # rubocop:disable Lint/UnusedMethodArgument
@@ -35,6 +29,17 @@ class RedisClient
         def any_replica_node_key(seed: nil)
           random = seed.nil? ? Random : Random.new(seed)
           @existed_replicas.sample(random: random)&.first || any_primary_node_key(seed: seed)
+        end
+
+        def process_topology_update!(replications, options, **kwargs)
+          super
+
+          all_replica_clients = @clients.select { |k, _| @replica_node_keys.include?(k) }
+          latencies = measure_latencies(all_replica_clients, @concurrent_worker)
+          @replications.each_value { |keys| keys.sort_by! { |k| latencies.fetch(k) } }
+          @replica_clients = select_replica_clients(@replications, @clients)
+          @clients_for_scanning = select_clients_for_scanning(@replications, @clients)
+          @existed_replicas = @replications.values.reject(&:empty?)
         end
 
         private

@@ -7,8 +7,9 @@ class RedisClient
         attr_reader :clients
 
         def initialize(replications, options, pool, _concurrent_worker, **kwargs)
-          @primary_node_keys = replications.keys.sort
-          @clients = build_clients(@primary_node_keys, options, pool, **kwargs)
+          @pool = pool
+          @clients = {}
+          process_topology_update!(replications, options, **kwargs)
         end
 
         alias primary_clients clients
@@ -29,17 +30,28 @@ class RedisClient
 
         alias any_replica_node_key any_primary_node_key
 
-        private
+        def process_topology_update!(replications, options, **kwargs)
+          @primary_node_keys = replications.keys.sort
+          desired_node_keys = if @primary_node_keys.any?
+            options.keys.select { |node_key| @primary_node_keys.include?(node_key) }
+          else
+            # During initial startup, when we don't even _know_ what is a primary, connect to all nodes.
+            options.keys
+          end
 
-        def build_clients(primary_node_keys, options, pool, **kwargs)
-          options.filter_map do |node_key, option|
-            next if !primary_node_keys.empty? && !primary_node_keys.include?(node_key)
+          # disconnect from nodes we no longer want
+          (@clients.keys - desired_node_keys).each do |node_key|
+            @clients.delete(node_key).close
+          end
 
-            option = option.merge(kwargs.reject { |k, _| ::RedisClient::Cluster::Node::IGNORE_GENERIC_CONFIG_KEYS.include?(k) })
+          # Connect to nodes we want and are not yet connected to
+          (desired_node_keys - @clients.keys).each do |node_key|
+            kwarg_options = kwargs.reject { |k, _| ::RedisClient::Cluster::Node::IGNORE_GENERIC_CONFIG_KEYS.include?(k) }
+            option = options[node_key].merge(kwarg_options)
             config = ::RedisClient::Cluster::Node::Config.new(**option)
-            client = pool.nil? ? config.new_client : config.new_pool(**pool)
-            [node_key, client]
-          end.to_h
+            client = @pool.nil? ? config.new_client : config.new_pool(**@pool)
+            @clients[node_key] = client
+          end
         end
       end
     end
