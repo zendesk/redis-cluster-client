@@ -114,6 +114,12 @@ class RedisClient
       @mutex.synchronize { @node_configs << { host: host, port: port } }
     end
 
+    def client_config_for_node(node_key)
+      # Start with any explicitly loaded config for this node, if set
+      config = startup_nodes.fetch(node_key, ::RedisClient::Cluster::NodeKey.hashify(node_key))
+      augment_client_config(config)
+    end
+
     private
 
     def merge_concurrency_option(option)

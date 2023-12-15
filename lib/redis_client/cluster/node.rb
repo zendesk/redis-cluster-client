@@ -142,7 +142,6 @@ class RedisClient
           grouped.max_by { |_, v| v.size }[1].first.freeze
         end
 
-        private
 
         # @see https://redis.io/commands/cluster-nodes/
         # @see https://github.com/redis/redis/blob/78960ad57b8a5e6af743d789ed8fd767e37d42b8/src/cluster.c#L4660-L4683
@@ -175,6 +174,8 @@ class RedisClient
           end
         end
 
+        private
+
         # As redirection node_key is dependent on `cluster-preferred-endpoint-type` config,
         # node_key should use hostname if present in CLUSTER NODES output.
         #
@@ -198,8 +199,9 @@ class RedisClient
         pool: nil,
         **kwargs
       )
-
+        @config = config
         @concurrent_worker = concurrent_worker
+        @client_extra_opts = kwargs
         @slots = build_slot_node_mappings(node_info_list)
         @replications = build_replication_mappings(node_info_list)
         klass = make_topology_class(config.use_replica?, config.replica_affinity)
@@ -291,7 +293,64 @@ class RedisClient
         end
       end
 
+      def reload!
+        new_node_info_list = refetch_node_info_list(@topology)
+        new_node_configs = new_node_info_list.to_h do |node_info|
+          [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
+        end
+
+        @slots = build_slot_node_mappings(new_node_info_list)
+        @replications = build_replication_mappings(new_node_info_list)
+        @topology.process_topology_update!(@replications, new_node_configs, **@client_kwargs)
+      end
+
       private
+
+      def refetch_node_info_list(startup_topology)
+        startup_clients = startup_topology.clients.values.sample(MAX_STARTUP_SAMPLE)
+        startup_size = startup_clients.size
+        work_group = @concurrent_worker.new_group(size: startup_size)
+
+        startup_clients.each_with_index do |raw_client, i|
+          work_group.push(i, raw_client) do |client|
+            regular_timeout = client.read_timeout
+            client.read_timeout = @config.slow_command_timeout > 0.0 ? @config.slow_command_timeout : regular_timeout
+            reply = client.call('CLUSTER', 'NODES')
+            client.read_timeout = regular_timeout
+            self.class.parse_cluster_node_reply(reply)
+          rescue StandardError => e
+            e
+          ensure
+            client&.close
+          end
+        end
+
+        node_info_list = errors = nil
+
+        work_group.each do |i, v|
+          case v
+          when StandardError
+            errors ||= Array.new(startup_size)
+            errors[i] = v
+          else
+            node_info_list ||= Array.new(startup_size)
+            node_info_list[i] = v
+          end
+        end
+
+        work_group.close
+
+        raise ::RedisClient::Cluster::InitialSetupError, errors if node_info_list.nil?
+
+        grouped = node_info_list.compact.group_by do |info_list|
+          info_list.sort_by!(&:id)
+          info_list.each_with_object(String.new(capacity: 128 * info_list.size)) do |e, a|
+            a << e.id << e.node_key << e.role << e.primary_id << e.config_epoch
+          end
+        end
+
+        grouped.max_by { |_, v| v.size }[1].first
+      end
 
       def make_topology_class(with_replica, replica_affinity)
         if with_replica && replica_affinity == :random
