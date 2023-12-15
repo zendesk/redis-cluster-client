@@ -290,32 +290,16 @@ class RedisClient
       end
 
       def fetch_cluster_info(config, concurrent_worker, pool: nil, **kwargs)
-        node_info_list = ::RedisClient::Cluster::Node.load_info(config.per_node_key, concurrent_worker, config: config, **kwargs)
-        node_addrs = node_info_list.map { |i| ::RedisClient::Cluster::NodeKey.hashify(i.node_key) }
-        config.update_node(node_addrs)
         ::RedisClient::Cluster::Node.new(
-          config.per_node_key,
           concurrent_worker,
           config: config,
-          node_info_list: node_info_list,
           pool: pool,
           **kwargs
         )
       end
 
       def update_cluster_info!
-        return if @mutex.locked?
-
-        @mutex.synchronize do
-          begin
-            @node.each(&:close)
-          rescue ::RedisClient::Cluster::ErrorCollection
-            # ignore
-          end
-
-          @config = @original_config.dup if @connect_with_original_config
-          @node = fetch_cluster_info(@config, @concurrent_worker, pool: @pool, **@client_kwargs)
-        end
+        @node.reload!
       end
     end
   end

@@ -96,9 +96,8 @@ class RedisClient
         def load_info(options, concurrent_worker, config:, **kwargs) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
           raise ::RedisClient::Cluster::InitialSetupError, [] if options.nil? || options.empty?
 
-          startup_size = options.size > MAX_STARTUP_SAMPLE ? MAX_STARTUP_SAMPLE : options.size
-          startup_options = options.to_a.sample(startup_size).to_h
-          startup_nodes = ::RedisClient::Cluster::Node.new(startup_options, concurrent_worker, config: config, **kwargs)
+          startup_nodes = ::RedisClient::Cluster::Node.new(concurrent_worker, config: config, **kwargs)
+          startup_size = startup_nodes.to_a.size
           work_group = concurrent_worker.new_group(size: startup_size)
 
           startup_nodes.each_with_index do |raw_client, i|
@@ -192,22 +191,20 @@ class RedisClient
       end
 
       def initialize(
-        options,
         concurrent_worker,
         config:,
-        node_info_list: [],
         pool: nil,
         **kwargs
       )
-        @config = config
         @concurrent_worker = concurrent_worker
+        @config = config
+        @pool = pool
         @client_extra_opts = kwargs
-        @slots = build_slot_node_mappings(node_info_list)
-        @replications = build_replication_mappings(node_info_list)
-        klass = make_topology_class(config.use_replica?, config.replica_affinity)
-        @topology = klass.new(@replications, options, pool, @concurrent_worker, **kwargs)
         @mutex = Mutex.new
+        reload!
       end
+
+      attr_reader :node_info, :node_configs
 
       def inspect
         "#<#{self.class.name} #{node_keys.join(', ')}>"
@@ -294,23 +291,24 @@ class RedisClient
       end
 
       def reload!
-        startup_clients = if @config.connect_with_original_config
-          startup_nodes = config.startup_nodes.to_a.sample(MAX_STARTUP_SAMPLE).to_h
-          topology = ::RedisClient::Cluster::Node::PrimaryOnly.new(
-            {}, startup_nodes, nil, @concurrent_worker, **@client_kwargs
-          )
-          topology.clients.values
+        startup_clients = if @config.connect_with_original_config || @topology.nil?
+          startup_topology(MAX_STARTUP_SAMPLE).clients.values
         else
           @topology.clients.values.sample(MAX_STARTUP_SAMPLE)
         end
-        new_node_info_list = refetch_node_info_list(startup_clients)
-        new_node_configs = new_node_info_list.to_h do |node_info|
+        @node_info = refetch_node_info_list(startup_clients)
+        @node_configs = @node_info.to_h do |node_info|
           [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
         end
 
-        @slots = build_slot_node_mappings(new_node_info_list)
-        @replications = build_replication_mappings(new_node_info_list)
-        @topology.process_topology_update!(@replications, new_node_configs, **@client_kwargs)
+        @slots = build_slot_node_mappings(@node_info)
+        @replications = build_replication_mappings(@node_info)
+        if @topology.nil?
+          klass = make_topology_class(@config.use_replica?, @config.replica_affinity)
+          @topology = klass.new(@replications, @node_configs, @pool, @concurrent_worker, **@client_extra_opts)
+        else
+          @topology.process_topology_update!(@replications, @node_configs, **@client_extra_opts)
+        end
       end
 
       private
@@ -358,6 +356,13 @@ class RedisClient
         end
 
         grouped.max_by { |_, v| v.size }[1].first
+      end
+
+      def startup_topology(count)
+        startup_nodes = @config.startup_nodes.to_a.sample(count).to_h
+        ::RedisClient::Cluster::Node::PrimaryOnly.new(
+          {}, startup_nodes, nil, @concurrent_worker, **@client_extra_opts
+        )
       end
 
       def make_topology_class(with_replica, replica_affinity)

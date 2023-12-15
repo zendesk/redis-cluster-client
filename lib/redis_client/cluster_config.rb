@@ -41,10 +41,10 @@ class RedisClient
       @replica_affinity = replica_affinity.to_s.to_sym
       @fixed_hostname = fixed_hostname.to_s
       @node_configs = build_node_configs(nodes.dup)
+      @client_config = merge_generic_config(client_config, @node_configs)
       @startup_nodes = build_startup_nodes_map(nodes).freeze
       client_config = client_config.reject { |k, _| IGNORE_GENERIC_CONFIG_KEYS.include?(k) }
       @command_builder = client_config.fetch(:command_builder, ::RedisClient::CommandBuilder)
-      @client_config = merge_generic_config(client_config, @node_configs)
       @concurrency = merge_concurrency_option(concurrency)
       @connect_with_original_config = connect_with_original_config
       @client_implementation = client_implementation
