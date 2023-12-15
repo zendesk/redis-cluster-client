@@ -23,7 +23,7 @@ class RedisClient
 
     InvalidClientConfigError = Class.new(::RedisClient::Error)
 
-    attr_reader :command_builder, :client_config, :replica_affinity, :slow_command_timeout, :connect_with_original_config
+    attr_reader :command_builder, :client_config, :replica_affinity, :slow_command_timeout, :connect_with_original_config, :startup_nodes
 
     def initialize( # rubocop:disable Metrics/AbcSize
       nodes: DEFAULT_NODES,
@@ -41,6 +41,7 @@ class RedisClient
       @replica_affinity = replica_affinity.to_s.to_sym
       @fixed_hostname = fixed_hostname.to_s
       @node_configs = build_node_configs(nodes.dup)
+      @startup_nodes = build_startup_nodes_map(nodes).freeze
       client_config = client_config.reject { |k, _| IGNORE_GENERIC_CONFIG_KEYS.include?(k) }
       @command_builder = client_config.fetch(:command_builder, ::RedisClient::CommandBuilder)
       @client_config = merge_generic_config(client_config, @node_configs)
@@ -62,7 +63,9 @@ class RedisClient
         client_implementation: @client_implementation,
         slow_command_timeout: @slow_command_timeout,
         **@client_config
-      )
+      ).tap do |clone|
+        clone.instance_variable_set(:@startup_nodes, @startup_nodes)
+      end
     end
 
     def inspect
@@ -127,6 +130,20 @@ class RedisClient
       raise InvalidClientConfigError, '`nodes` option is empty' if configs.empty?
 
       configs
+    end
+
+    def build_startup_nodes_map(nodes)
+      build_node_configs(nodes).to_h do |config|
+        config = augment_client_config(config)
+        node_key = ::RedisClient::Cluster::NodeKey.build_from_host_port(config[:host], config[:port])
+        [node_key, config]
+      end
+    end
+
+    def augment_client_config(config)
+      config = @client_config.merge(config)
+      config = config.merge(host: @fixed_hostname) unless @fixed_hostname.empty?
+      config
     end
 
     def parse_node_addr(addr)
