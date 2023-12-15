@@ -294,7 +294,16 @@ class RedisClient
       end
 
       def reload!
-        new_node_info_list = refetch_node_info_list(@topology)
+        startup_clients = if @config.connect_with_original_config
+          startup_nodes = config.startup_nodes.to_a.sample(MAX_STARTUP_SAMPLE).to_h
+          topology = ::RedisClient::Cluster::Node::PrimaryOnly.new(
+            {}, startup_nodes, nil, @concurrent_worker, **@client_kwargs
+          )
+          topology.clients.values
+        else
+          @topology.clients.values.sample(MAX_STARTUP_SAMPLE)
+        end
+        new_node_info_list = refetch_node_info_list(startup_clients)
         new_node_configs = new_node_info_list.to_h do |node_info|
           [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
         end
@@ -306,8 +315,7 @@ class RedisClient
 
       private
 
-      def refetch_node_info_list(startup_topology)
-        startup_clients = startup_topology.clients.values.sample(MAX_STARTUP_SAMPLE)
+      def refetch_node_info_list(startup_clients)
         startup_size = startup_clients.size
         work_group = @concurrent_worker.new_group(size: startup_size)
 
