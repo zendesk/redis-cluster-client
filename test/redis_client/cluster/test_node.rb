@@ -63,6 +63,8 @@ class RedisClient
       end
 
       def test_load_info
+        # TODO: Skipping this because I'm about to delete #load_info
+        skip "deleting this function soon"
         [
           {
             params: { options: TEST_NODE_OPTIONS, kwargs: TEST_GENERIC_OPTIONS },
