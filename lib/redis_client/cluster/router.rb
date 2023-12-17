@@ -16,9 +16,7 @@ class RedisClient
       TSF = ->(f, x) { f.nil? ? x : f.call(x) }.curry
 
       def initialize(config, concurrent_worker, pool: nil, **kwargs)
-        @config = config.dup
-        @original_config = config.dup if config.connect_with_original_config
-        @connect_with_original_config = config.connect_with_original_config
+        @config = config
         @concurrent_worker = concurrent_worker
         @pool = pool
         @client_kwargs = kwargs

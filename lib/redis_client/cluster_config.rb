@@ -40,36 +40,24 @@ class RedisClient
       @replica = true & replica
       @replica_affinity = replica_affinity.to_s.to_sym
       @fixed_hostname = fixed_hostname.to_s
-      @node_configs = build_node_configs(nodes.dup)
-      @client_config = merge_generic_config(client_config, @node_configs)
-      @startup_nodes = build_startup_nodes_map(nodes).freeze
-      client_config = client_config.reject { |k, _| IGNORE_GENERIC_CONFIG_KEYS.include?(k) }
+
+      # The steps to build our list of startup nodes are:
+      # 1. Parse the URL's we're given as `nodes`
+      # 2. extract out MERGE_CONFIG_KEYS out of the parsed URLs and merge that into client_configs
+      # 3. Merge the client_configs into all of the node configurations.
+      node_configs = build_node_configs(nodes)
+      @client_config = merge_generic_config(client_config, node_configs)
+      @startup_nodes = build_startup_nodes(node_configs)
+
       @command_builder = client_config.fetch(:command_builder, ::RedisClient::CommandBuilder)
       @concurrency = merge_concurrency_option(concurrency)
       @connect_with_original_config = connect_with_original_config
       @client_implementation = client_implementation
       @slow_command_timeout = slow_command_timeout
-      @mutex = Mutex.new
-    end
-
-    def dup
-      self.class.new(
-        nodes: @node_configs,
-        replica: @replica,
-        replica_affinity: @replica_affinity,
-        fixed_hostname: @fixed_hostname,
-        concurrency: @concurrency,
-        connect_with_original_config: @connect_with_original_config,
-        client_implementation: @client_implementation,
-        slow_command_timeout: @slow_command_timeout,
-        **@client_config
-      ).tap do |clone|
-        clone.instance_variable_set(:@startup_nodes, @startup_nodes)
-      end
     end
 
     def inspect
-      "#<#{self.class.name} #{per_node_key.values}>"
+      "#<#{self.class.name} #{startup_nodes.values}>"
     end
 
     def read_timeout
@@ -89,34 +77,12 @@ class RedisClient
       @client_implementation.new(self, concurrency: @concurrency, **kwargs)
     end
 
-    def per_node_key
-      @node_configs.to_h do |config|
-        node_key = ::RedisClient::Cluster::NodeKey.build_from_host_port(config[:host], config[:port])
-        config = @client_config.merge(config)
-        config = config.merge(host: @fixed_hostname) unless @fixed_hostname.empty?
-        [node_key, config]
-      end
-    end
-
     def use_replica?
       @replica
     end
 
-    def update_node(addrs)
-      return if @mutex.locked?
-
-      @mutex.synchronize { @node_configs = build_node_configs(addrs) }
-    end
-
-    def add_node(host, port)
-      return if @mutex.locked?
-
-      @mutex.synchronize { @node_configs << { host: host, port: port } }
-    end
-
     def client_config_for_node(node_key)
-      # Start with any explicitly loaded config for this node, if set
-      config = startup_nodes.fetch(node_key, ::RedisClient::Cluster::NodeKey.hashify(node_key))
+      config = ::RedisClient::Cluster::NodeKey.hashify(node_key)
       augment_client_config(config)
     end
 
@@ -138,8 +104,8 @@ class RedisClient
       configs
     end
 
-    def build_startup_nodes_map(nodes)
-      build_node_configs(nodes).to_h do |config|
+    def build_startup_nodes(configs)
+      configs.to_h do |config|
         config = augment_client_config(config)
         node_key = ::RedisClient::Cluster::NodeKey.build_from_host_port(config[:host], config[:port])
         [node_key, config]
@@ -199,11 +165,9 @@ class RedisClient
     end
 
     def merge_generic_config(client_config, node_configs)
-      return client_config if node_configs.empty?
-
-      cfg = node_configs.first
-      MERGE_CONFIG_KEYS.each { |k| client_config[k] = cfg[k] if cfg.key?(k) }
-      client_config
+      cfg = node_configs.first || {}
+      client_config.merge(cfg.slice(*MERGE_CONFIG_KEYS))
+                   .reject { |k, _| IGNORE_GENERIC_CONFIG_KEYS.include?(k) }
     end
   end
 end
