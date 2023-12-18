@@ -11,7 +11,8 @@ class RedisClient
         def initialize(replications, options, pool, _concurrent_worker, **kwargs)
           @pool = pool
           @clients = {}
-          process_topology_update!(replications, options, **kwargs)
+          @client_options = kwargs.reject { |k, _| ::RedisClient::Cluster::Node::IGNORE_GENERIC_CONFIG_KEYS.include?(k) }
+          process_topology_update!(replications, options)
         end
 
         def any_primary_node_key(seed: nil)
@@ -19,7 +20,7 @@ class RedisClient
           @primary_node_keys.sample(random: random)
         end
 
-        def process_topology_update!(replications, options, **kwargs)
+        def process_topology_update!(replications, options) # rubocop:disable Metrics/AbcSize
           @replications = replications
           @primary_node_keys = @replications.keys.sort
           @replica_node_keys = @replications.values.flatten.sort
@@ -31,8 +32,7 @@ class RedisClient
 
           # Connect to nodes that we are not yet connected to
           (options.keys - @clients.keys).each do |node_key|
-            kwarg_options = kwargs.reject { |k, _| ::RedisClient::Cluster::Node::IGNORE_GENERIC_CONFIG_KEYS.include?(k) }
-            option = options[node_key].merge(kwarg_options)
+            option = options[node_key].merge(@client_options)
             config = ::RedisClient::Cluster::Node::Config.new(scale_read: !@primary_node_keys.include?(node_key), **option)
             client = @pool.nil? ? config.new_client : config.new_pool(**@pool)
             @clients[node_key] = client

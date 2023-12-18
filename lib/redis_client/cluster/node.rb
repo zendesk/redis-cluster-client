@@ -101,8 +101,9 @@ class RedisClient
         @concurrent_worker = concurrent_worker
         @config = config
         @pool = pool
-        @client_extra_opts = kwargs
         @mutex = Mutex.new
+        @topology = make_topology_class(@config.use_replica?, @config.replica_affinity)
+                    .new({}, {}, @pool, @concurrent_worker, **kwargs)
         reload!
       end
 
@@ -201,43 +202,22 @@ class RedisClient
       end
 
       def reload!
-        # What should happen with concurrent calls #reload? This is a realistic possibility if the cluster goes into
-        # a CLUSTERDOWN state, and we're using a pooled backend. Every thread will independently discover this, and
-        # call reload!.
-        # For now, if a reload is in progress, wait for that to complete, and consider that the same as us having
-        # performed the reload.
-        # Probably in the future we should add a circuit breaker to #reload itself, and stop trying if the cluster is
-        # obviously not working.
-        wait_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        @mutex.synchronize do
-          return if @last_reloaded_at && @last_reloaded_at > wait_start
-
-          startup_clients = if @config.connect_with_original_config || @topology.nil?
-                              startup_topology(MAX_STARTUP_SAMPLE).clients.values
-                            else
-                              @topology.clients.values.sample(MAX_STARTUP_SAMPLE)
-                            end
-          @node_info = refetch_node_info_list(startup_clients)
-          @node_configs = @node_info.to_h do |node_info|
-            [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
+        with_reload_lock do
+          with_startup_clients(MAX_STARTUP_SAMPLE) do |startup_clients|
+            @node_info = refetch_node_info_list(startup_clients)
+            @node_configs = @node_info.to_h do |node_info|
+              [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
+            end
+            @slots = build_slot_node_mappings(@node_info)
+            @replications = build_replication_mappings(@node_info)
+            @topology.process_topology_update!(@replications, @node_configs)
           end
-
-          @slots = build_slot_node_mappings(@node_info)
-          @replications = build_replication_mappings(@node_info)
-          if @topology.nil?
-            klass = make_topology_class(@config.use_replica?, @config.replica_affinity)
-            @topology = klass.new(@replications, @node_configs, @pool, @concurrent_worker, **@client_extra_opts)
-          else
-            @topology.process_topology_update!(@replications, @node_configs, **@client_extra_opts)
-          end
-
-          @last_reloaded_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
       end
 
       private
 
-      def refetch_node_info_list(startup_clients)
+      def refetch_node_info_list(startup_clients) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
         startup_size = startup_clients.size
         work_group = @concurrent_worker.new_group(size: startup_size)
 
@@ -325,11 +305,47 @@ class RedisClient
         "#{hostname}:#{port}"
       end
 
-      def startup_topology(count)
-        startup_nodes = @config.startup_nodes.to_a.sample(count).to_h
-        ::RedisClient::Cluster::Node::PrimaryOnly.new(
-          {}, startup_nodes, nil, @concurrent_worker, **@client_extra_opts
-        )
+      def with_startup_clients(count) # rubocop:disable Metrics/AbcSize
+        if @config.connect_with_original_config
+          # If connect_with_original_config is set, that means we need to build actual client objects
+          # and close them, so that we e.g. re-resolve a DNS entry with the cluster nodes in it.
+          begin
+            # Memoize the startup clients, so we maintain RedisClient's internal circuit breaker configuration
+            # if it's set.
+            @startup_clients ||= @config.startup_nodes.values.sample(count).map do |node_config|
+              ::RedisClient::Cluster::Node::Config.new(node_config).new_client
+            end
+            yield @startup_clients
+          ensure
+            # Close the startup clients when we're done, so we don't maintain pointless open connections to
+            # the cluster though
+            @startup_clients&.each(&:close)
+          end
+        else
+          # (re-)connect using nodes we already know about.
+          # If this is the first time we're connecting to the cluster, we need to seed the topology with the
+          # startup clients though.
+          @topology.process_topology_update!({}, @config.startup_nodes) if @topology.clients.empty?
+          yield @topology.clients.values.sample(count)
+        end
+      end
+
+      def with_reload_lock
+        # What should happen with concurrent calls #reload? This is a realistic possibility if the cluster goes into
+        # a CLUSTERDOWN state, and we're using a pooled backend. Every thread will independently discover this, and
+        # call reload!.
+        # For now, if a reload is in progress, wait for that to complete, and consider that the same as us having
+        # performed the reload.
+        # Probably in the future we should add a circuit breaker to #reload itself, and stop trying if the cluster is
+        # obviously not working.
+        wait_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        @mutex.synchronize do
+          return if @last_reloaded_at && @last_reloaded_at > wait_start
+
+          r = yield
+          @last_reloaded_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          r
+        end
       end
 
       def make_topology_class(with_replica, replica_affinity)
