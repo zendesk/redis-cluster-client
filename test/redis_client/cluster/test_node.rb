@@ -30,27 +30,16 @@ class RedisClient
         )
         @concurrent_worker = ::RedisClient::Cluster::ConcurrentWorker.create
         @test_node_info_list = ::RedisClient::Cluster::Node.new(@concurrent_worker, config: @test_config).node_info
-        if TEST_FIXED_HOSTNAME
-          @test_node_info_list.each do |info|
-            _, port = ::RedisClient::Cluster::NodeKey.split(info.node_key)
-            info.node_key = ::RedisClient::Cluster::NodeKey.build_from_host_port(TEST_FIXED_HOSTNAME, port)
-          end
-          node_addrs = @test_node_info_list.map { |info| ::RedisClient::Cluster::NodeKey.hashify(info.node_key) }
-          @test_config = ::RedisClient::ClusterConfig.new(
-            nodes: node_addrs,
-            fixed_hostname: TEST_FIXED_HOSTNAME,
-            **TEST_GENERIC_OPTIONS
-          )
-        end
-
         @test_node = ::RedisClient::Cluster::Node.new(
           @concurrent_worker,
           config: @test_config,
         )
-        @test_config_with_scale_read = @test_config.dup
-        @test_config_with_scale_read.instance_exec do
-          @replica = true
-        end
+        @test_config_with_scale_read = ::RedisClient::ClusterConfig.new(
+          nodes: TEST_NODE_URIS,
+          fixed_hostname: TEST_FIXED_HOSTNAME,
+          replica: true,
+          **TEST_GENERIC_OPTIONS
+        )
         @test_node_with_scale_read = ::RedisClient::Cluster::Node.new(
           @concurrent_worker,
           config: @test_config_with_scale_read,
