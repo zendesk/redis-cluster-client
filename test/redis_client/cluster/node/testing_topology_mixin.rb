@@ -18,7 +18,7 @@ class RedisClient
         end
 
         def teardown
-          @test_node&.each { |c| c.close }
+          @test_node&.each(&:close)
         end
       end
     end

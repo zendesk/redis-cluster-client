@@ -32,7 +32,7 @@ class RedisClient
         @test_node_info_list = ::RedisClient::Cluster::Node.new(@concurrent_worker, config: @test_config).node_info
         @test_node = ::RedisClient::Cluster::Node.new(
           @concurrent_worker,
-          config: @test_config,
+          config: @test_config
         )
         @test_config_with_scale_read = ::RedisClient::ClusterConfig.new(
           nodes: TEST_NODE_URIS,
@@ -42,7 +42,7 @@ class RedisClient
         )
         @test_node_with_scale_read = ::RedisClient::Cluster::Node.new(
           @concurrent_worker,
-          config: @test_config_with_scale_read,
+          config: @test_config_with_scale_read
         )
       end
 
@@ -614,9 +614,8 @@ class RedisClient
 
         # We should only have reloaded once, which is to say, we only called CLUSTER NODES command MAX_STARTUP_SAMPLE
         # times
-        cluster_node_cmds = capture_buffer.select { |c| c.command == ['CLUSTER', 'NODES'] }
+        cluster_node_cmds = capture_buffer.select { |c| c.command == %w[CLUSTER NODES] }
         assert_equal RedisClient::Cluster::Node::MAX_STARTUP_SAMPLE, cluster_node_cmds.size
-
       ensure
         test_node_with_pool&.each(&:close)
       end

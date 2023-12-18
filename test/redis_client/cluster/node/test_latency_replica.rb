@@ -18,7 +18,7 @@ class RedisClient
 
         def test_clients_with_pooled_redis_client
           pooled_node = ::RedisClient::Cluster::Node.new(
-            @concurrent_worker, config: @test_config, pool: { timeout: 3, size: 2}
+            @concurrent_worker, config: @test_config, pool: { timeout: 3, size: 2 }
           )
           got = pooled_node.clients
           got.each { |client| assert_instance_of(::RedisClient::Pooled, client) }

@@ -213,10 +213,10 @@ class RedisClient
           return if @last_reloaded_at && @last_reloaded_at > wait_start
 
           startup_clients = if @config.connect_with_original_config || @topology.nil?
-            startup_topology(MAX_STARTUP_SAMPLE).clients.values
-          else
-            @topology.clients.values.sample(MAX_STARTUP_SAMPLE)
-          end
+                              startup_topology(MAX_STARTUP_SAMPLE).clients.values
+                            else
+                              @topology.clients.values.sample(MAX_STARTUP_SAMPLE)
+                            end
           @node_info = refetch_node_info_list(startup_clients)
           @node_configs = @node_info.to_h do |node_info|
             [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
@@ -289,13 +289,13 @@ class RedisClient
           next unless fields[7] == 'connected' && (flags & DEAD_FLAGS).empty?
 
           slots = if fields[8].nil?
-            EMPTY_ARRAY
-          else
-            fields[8..].reject { |str| str.start_with?('[') }
-                       .map { |str| str.split('-').map { |s| Integer(s) } }
-                       .map { |a| a.size == 1 ? a << a.first : a }
-                       .map(&:sort)
-          end
+                    EMPTY_ARRAY
+                  else
+                    fields[8..].reject { |str| str.start_with?('[') }
+                               .map { |str| str.split('-').map { |s| Integer(s) } }
+                               .map { |a| a.size == 1 ? a << a.first : a }
+                               .map(&:sort)
+                  end
 
           ::RedisClient::Cluster::Node::Info.new(
             id: fields[0],

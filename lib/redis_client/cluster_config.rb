@@ -25,7 +25,7 @@ class RedisClient
 
     attr_reader :command_builder, :client_config, :replica_affinity, :slow_command_timeout, :connect_with_original_config, :startup_nodes
 
-    def initialize( # rubocop:disable Metrics/AbcSize
+    def initialize(
       nodes: DEFAULT_NODES,
       replica: false,
       replica_affinity: :random,

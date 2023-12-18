@@ -33,11 +33,11 @@ class RedisClient
         def process_topology_update!(replications, options, **kwargs)
           @primary_node_keys = replications.keys.sort
           desired_node_keys = if @primary_node_keys.any?
-            options.keys.select { |node_key| @primary_node_keys.include?(node_key) }
-          else
-            # During initial startup, when we don't even _know_ what is a primary, connect to all nodes.
-            options.keys
-          end
+                                options.keys.select { |node_key| @primary_node_keys.include?(node_key) }
+                              else
+                                # During initial startup, when we don't even _know_ what is a primary, connect to all nodes.
+                                options.keys
+                              end
 
           # disconnect from nodes we no longer want
           (@clients.keys - desired_node_keys).each do |node_key|
