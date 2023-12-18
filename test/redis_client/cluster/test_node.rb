@@ -619,6 +619,31 @@ class RedisClient
       ensure
         test_node_with_pool&.each(&:close)
       end
+
+      def test_reload_with_original_config
+        bootstrap_node = TEST_NODE_URIS.first
+        capture_buffer = []
+        config = ::RedisClient::ClusterConfig.new(
+          nodes: [bootstrap_node],
+          fixed_hostname: TEST_FIXED_HOSTNAME,
+          connect_with_original_config: true,
+          middlewares: [CommandCaptureMiddleware],
+          custom: { captured_commands: capture_buffer },
+          **TEST_GENERIC_OPTIONS
+        )
+        test_node = ::RedisClient::Cluster::Node.new(@concurrent_worker, config: config)
+
+        capture_buffer.clear
+
+        # When we reload, it will only call CLUSTER NODES against a single node, the bootstrap node.
+        test_node.reload!
+
+        cluster_node_cmds = capture_buffer.select { |c| c.command == %w[CLUSTER NODES] }
+        assert_equal 1, cluster_node_cmds.size
+        assert_equal bootstrap_node, cluster_node_cmds.first.server_url
+      ensure
+        test_node&.each(&:close)
+      end
     end
     # rubocop:enable Metrics/ClassLength
   end

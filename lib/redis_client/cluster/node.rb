@@ -313,7 +313,7 @@ class RedisClient
             # Memoize the startup clients, so we maintain RedisClient's internal circuit breaker configuration
             # if it's set.
             @startup_clients ||= @config.startup_nodes.values.sample(count).map do |node_config|
-              ::RedisClient::Cluster::Node::Config.new(node_config).new_client
+              ::RedisClient::Cluster::Node::Config.new(**node_config).new_client
             end
             yield @startup_clients
           ensure
