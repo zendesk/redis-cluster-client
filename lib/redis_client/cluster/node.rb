@@ -201,23 +201,37 @@ class RedisClient
       end
 
       def reload!
-        startup_clients = if @config.connect_with_original_config || @topology.nil?
-          startup_topology(MAX_STARTUP_SAMPLE).clients.values
-        else
-          @topology.clients.values.sample(MAX_STARTUP_SAMPLE)
-        end
-        @node_info = refetch_node_info_list(startup_clients)
-        @node_configs = @node_info.to_h do |node_info|
-          [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
-        end
+        # What should happen with concurrent calls #reload? This is a realistic possibility if the cluster goes into
+        # a CLUSTERDOWN state, and we're using a pooled backend. Every thread will independently discover this, and
+        # call reload!.
+        # For now, if a reload is in progress, wait for that to complete, and consider that the same as us having
+        # performed the reload.
+        # Probably in the future we should add a circuit breaker to #reload itself, and stop trying if the cluster is
+        # obviously not working.
+        wait_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        @mutex.synchronize do
+          return if @last_reloaded_at && @last_reloaded_at > wait_start
 
-        @slots = build_slot_node_mappings(@node_info)
-        @replications = build_replication_mappings(@node_info)
-        if @topology.nil?
-          klass = make_topology_class(@config.use_replica?, @config.replica_affinity)
-          @topology = klass.new(@replications, @node_configs, @pool, @concurrent_worker, **@client_extra_opts)
-        else
-          @topology.process_topology_update!(@replications, @node_configs, **@client_extra_opts)
+          startup_clients = if @config.connect_with_original_config || @topology.nil?
+            startup_topology(MAX_STARTUP_SAMPLE).clients.values
+          else
+            @topology.clients.values.sample(MAX_STARTUP_SAMPLE)
+          end
+          @node_info = refetch_node_info_list(startup_clients)
+          @node_configs = @node_info.to_h do |node_info|
+            [node_info.node_key, @config.client_config_for_node(node_info.node_key)]
+          end
+
+          @slots = build_slot_node_mappings(@node_info)
+          @replications = build_replication_mappings(@node_info)
+          if @topology.nil?
+            klass = make_topology_class(@config.use_replica?, @config.replica_affinity)
+            @topology = klass.new(@replications, @node_configs, @pool, @concurrent_worker, **@client_extra_opts)
+          else
+            @topology.process_topology_update!(@replications, @node_configs, **@client_extra_opts)
+          end
+
+          @last_reloaded_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
       end
 
