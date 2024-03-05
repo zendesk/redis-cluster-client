@@ -125,7 +125,6 @@ class RedisClient
 
     private
 
-
     # This API is called by redis-clustering/redis-rb, but requries further refinement before we commit
     # to making it part of redis-cluster-client's official public API.
     def watch(keys)
