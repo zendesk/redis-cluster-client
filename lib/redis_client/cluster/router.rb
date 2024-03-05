@@ -257,7 +257,7 @@ class RedisClient
         case ::RedisClient::Cluster::NormalizedCmdName.instance.get_by_subcommand(command)
         when 'resetstat', 'rewrite', 'set'
           @node.call_all(method, command, args).first.then(&TSF.call(block))
-        else assign_node(command).public_send(method, *args, command, &block)
+        else try_send(assign_node(command), method, command, args, &block)
         end
       end
 
@@ -265,7 +265,7 @@ class RedisClient
         case ::RedisClient::Cluster::NormalizedCmdName.instance.get_by_subcommand(command)
         when 'stats' then @node.call_all(method, command, args, &block)
         when 'purge' then @node.call_all(method, command, args).first.then(&TSF.call(block))
-        else assign_node(command).public_send(method, *args, command, &block)
+        else try_send(assign_node(command), method, command, args, &block)
         end
       end
 
@@ -274,7 +274,7 @@ class RedisClient
         when 'list' then @node.call_all(method, command, args, &block).flatten
         when 'pause', 'reply', 'setname'
           @node.call_all(method, command, args).first.then(&TSF.call(block))
-        else assign_node(command).public_send(method, *args, command, &block)
+        else try_send(assign_node(command), method, command, args, &block)
         end
       end
 
@@ -287,8 +287,9 @@ class RedisClient
         when 'getkeysinslot'
           raise ArgumentError, command.join(' ') if command.size != 4
 
-          find_node(@node.find_node_key_of_replica(command[2])).public_send(method, *args, command, &block)
-        else assign_node(command).public_send(method, *args, command, &block)
+          node = find_node(@node.find_node_key_of_replica(command[2]))
+          try_send(node, method, command, args, &block)
+        else try_send(assign_node(command), method, command, args, &block)
         end
       end
 
@@ -300,7 +301,7 @@ class RedisClient
           @node.call_primaries(method, command, args).first.then(&TSF.call(block))
         when 'exists'
           @node.call_all(method, command, args).transpose.map { |arr| arr.any?(&:zero?) ? 0 : 1 }.then(&TSF.call(block))
-        else assign_node(command).public_send(method, *args, command, &block)
+        else try_send(assign_node(command), method, command, args, &block)
         end
       end
 
@@ -318,7 +319,7 @@ class RedisClient
         when 'shardnumsub'
           @node.call_replicas(method, command, args).reject(&:empty?).map { |e| Hash[*e] }
                .reduce({}) { |a, e| a.merge(e) { |_, v1, v2| v1 + v2 } }.then(&TSF.call(block))
-        else assign_node(command).public_send(method, *args, command, &block)
+        else try_send(assign_node(command), method, command, args, &block)
         end
       end
 
